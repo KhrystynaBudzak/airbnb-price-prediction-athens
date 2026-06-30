@@ -37,7 +37,6 @@ The dataset contains more than 15,000 Airbnb listings located in Athens, Greece.
 
 ```text
 README.md
-analysis.R
 report.html
 listings.csv
 ```
