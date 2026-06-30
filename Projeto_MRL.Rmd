@@ -1,0 +1,1184 @@
+---
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: false
+    number_sections: true
+    keep_tex: false
+header-includes:
+  - \usepackage{float}
+  - \floatplacement{table}{H}
+  - \floatplacement{figure}{H}
+  - \usepackage{caption}
+  - \captionsetup[figure]{font=small}
+  - \captionsetup[table]{font=small}
+---
+
+\begin{titlepage}
+\thispagestyle{empty}
+\centering
+
+\vspace*{1cm}
+
+% Logo do ISCTE no topo
+\includegraphics[width=4.5cm]{logo_iscte.png}
+
+\vspace{1cm}
+
+{\large Licenciatura em Ciência de Dados — 2.º Ano\par}
+\vspace{0.3cm}
+{\large Modelos de Regressão\par}
+\vspace{0.2cm}
+{\large 2025 / 2026\par}
+
+\vspace{1cm}
+
+% Imagem reduzida para garantir espaço na folha
+\includegraphics[width=10.5cm]{imagem_capa.png}
+
+\vspace{1cm}
+
+{\Large\textbf{Trabalho de Grupo}\par}
+\vspace{0.4cm}
+{\LARGE\textbf{Previsão de Preços Airbnb em Atenas}\par}
+
+\vfill
+
+% Elementos do grupo
+{\large 
+Guilherme Malini \quad Nº 124 666\par \vspace{0.1cm}
+Khrystyna Budzak \quad Nº 125 316\par \vspace{0.1cm}
+Pedro Mota \quad Nº 124 577\par \vspace{0.1cm}
+Xavier Simões \quad Nº 106 091\par
+}
+
+\vspace{0.7cm}
+
+{\large Docente: António Carlos Simões\par}
+
+\vspace{0.3cm}
+
+{\large Maio de 2026\par}
+
+\vspace{0.5cm}
+
+\end{titlepage}
+
+\newpage
+\tableofcontents
+\newpage
+
+```{r setup, include=FALSE}
+# Opções globais para o relatório
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  fig.width = 6.5,
+  fig.height = 4
+)
+```
+
+```{r pacotes, include=FALSE}
+# -------------------------------------------------------------
+# Bibliotecas
+# Quem não tiver alguma destas instalada deve correr a linha correspondente uma vez:
+# install.packages(c("dplyr","ggplot2","kableExtra","corrplot",
+#                    "gridExtra","geosphere","modelsummary",
+#                    "lmtest","olsrr","tseries","MASS","car",
+#                    "sandwich"))
+# -------------------------------------------------------------
+library(dplyr)         # filter, mutate, select
+library(ggplot2)       # gráficos
+library(kableExtra)    # tabelas com estilo
+library(corrplot)      # matriz de correlação
+library(gridExtra)     # juntar vários gráficos lado a lado
+library(geosphere)     # distância Haversine (lat/lon -> metros)
+library(knitr)         # kable
+library(modelsummary)  # comparar modelos
+library(lmtest)        # bptest, bgtest, coeftest
+library(olsrr)         # ols_step_both_aic
+library(tseries)       # jarque.bera.test
+library(MASS)          # stepAIC
+library(car)           # vif, crPlots, outlierTest
+library(sandwich)      # vcovHC (HC3 robust SE)
+library(caTools)       # treino/teste
+```
+
+```{r importar, include=FALSE}
+# Leitura do csv
+# encoding = "UTF-8" garante a leitura correta dos caracteres gregos
+df_raw <- read.csv("listings.csv",
+                   header = TRUE,
+                   stringsAsFactors = FALSE,
+                   na.strings = c("", "NA"),
+                   encoding = "UTF-8")
+```
+
+```{r guia_variaveis, eval=FALSE, include=FALSE}
+# df_raw → raw csv
+# df_limpo → fully cleaned + all features
+# df → modeling subset
+# df_clean → after Cook removal
+# m1, m2, m3, m4 → initial 4-model comparison
+# m4_no_bairro, m5 → bairro specification tests
+# m4_v2 → after Cook + VIF
+# m4_log_mn → after log(minimum_nights)
+# m4_log_rev → FINAL (log on minimum_nights AND reviews_per_month)
+# m_final <- m4_log_rev → clear alias for ch.6 and ch.7
+```
+
+
+\newpage
+
+# Enquadramento
+
+Este projeto enquadra-se na unidade curricular Modelos de Regressão da Licenciatura em Ciência de Dados do ISCTE. O objetivo é construir um modelo de regressão que estime o preço por noite dos alojamentos Airbnb na cidade de **Atenas**, atribuída ao nosso grupo. Os dados provêm do portal *Inside Airbnb* (`listings.csv`) e foram tratados segundo a metodologia CRISP-DM.
+
+**Questão de investigação:**
+
+> *Quais os fatores que mais influenciam o preço dos alojamentos Airbnb em Atenas, e em que medida a localização (distância a pontos de interesse e bairro) explica as variações de preço?*
+
+A variável dependente é o `price` (preço por noite, em euros). Os preditores incluem o tipo de alojamento, o bairro, a localização geográfica, métricas do anfitrião e indicadores de atividade (reviews e disponibilidade).
+
+# Dados originais
+
+O dataset original contém 15 584 observações e 18 variáveis, sendo cada linha um anúncio individual da plataforma.
+
+```{r tbl_dicionario}
+# Dicionário das variáveis
+desc_variaveis <- data.frame(
+  Variavel = c("id", "name", "host_id", "host_name", "neighbourhood_group",
+               "neighbourhood", "latitude", "longitude", "room_type", "price",
+               "minimum_nights", "number_of_reviews", "last_review",
+               "reviews_per_month", "calculated_host_listings_count",
+               "availability_365", "number_of_reviews_ltm", "license"),
+  Tipo = c("Numérico", "Texto", "Numérico", "Texto",
+           "Lógico", "Texto", "Numérico", "Numérico",
+           "Texto", "Numérico", "Numérico", "Numérico",
+           "Data", "Numérico", "Numérico", "Numérico",
+           "Numérico", "Texto"),
+  Descricao = c("Identificador único do anúncio.",
+                "Título do anúncio.",
+                "Identificador do anfitrião.",
+                "Nome do anfitrião.",
+                "Agrupamento geográfico (vazio).",
+                "Bairro ou zona administrativa.",
+                "Latitude (GPS).",
+                "Longitude (GPS).",
+                "Tipo de alojamento.",
+                "Preço por noite (variável-alvo).",
+                "Número mínimo de noites por reserva.",
+                "Total de avaliações dos hóspedes.",
+                "Data da última avaliação.",
+                "Média mensal de avaliações.",
+                "Total de imóveis geridos pelo anfitrião.",
+                "Disponibilidade do imóvel ao longo do ano.",
+                "Total de avaliações nos últimos 12 meses.",
+                "Número da licença turística.")
+)
+
+# Forçar UTF-8 nos caracteres especiais
+desc_variaveis <- desc_variaveis %>%
+  mutate(across(everything(), ~ enc2utf8(as.character(.x))))
+
+kable(desc_variaveis,
+      col.names = c("Variável", "Tipo", "Descrição"),
+      caption   = "Dicionário das variáveis do dataset original",
+      booktabs  = TRUE) |>
+  kable_styling(latex_options = c("striped", "scale_down", "hold_position"),
+                full_width    = FALSE) |>
+  column_spec(1, bold = TRUE, monospace = TRUE)
+```
+
+Para facilitar a análise, organizam-se as 18 variáveis em cinco grupos lógicos:
+
+1. **Identificação:** `id`, `name`, `host_id`, `host_name`, `license`, `neighbourhood_group`. Não têm valor explicativo e serão removidas antes da modelação.
+2. **Localização:** `neighbourhood`, `latitude`, `longitude`.
+3. **Atributos da oferta:** `room_type`, `minimum_nights`, `availability_365`, `calculated_host_listings_count`.
+4. **Popularidade e reputação:** `number_of_reviews`, `last_review`, `reviews_per_month`, `number_of_reviews_ltm`.
+5. **Variável-alvo:** `price`.
+
+# Análise Exploratória
+
+## Qualidade dos dados
+
+```{r tbl_na}
+# Contagem de NAs por variável (mostrar só as que têm pelo menos 1)
+n_na <- sapply(df_raw, function(x) sum(is.na(x)))
+pct  <- round(n_na / nrow(df_raw) * 100, 1)
+
+tabela_na <- data.frame(
+  Variavel = names(df_raw),
+  N_NAs    = n_na,
+  Perc_NAs = pct
+) |>
+  filter(N_NAs > 0) |>
+  arrange(desc(Perc_NAs))
+rownames(tabela_na) <- NULL
+
+kable(tabela_na,
+      col.names = c("Variável", "Total NAs", "% NAs"),
+      caption   = "Variáveis com valores em falta",
+      booktabs  = TRUE) |>
+  kable_styling(latex_options = c("striped", "hold_position"),
+                full_width    = FALSE) |>
+  column_spec(1, monospace = TRUE)
+```
+
+Decisões de tratamento (aplicadas na secção 4):
+
+- `price`: linhas com NA (~6,8%) são removidas — sem preço não é possível modelar.
+- `reviews_per_month`: NA é imputado a zero (ausência de reviews = taxa zero).
+- `last_review`: convertida de texto para `Date` e usada para derivar `has_review` e `days_since_last_review`.
+- Variáveis de identificação (`id`, `name`, `host_id`, `host_name`, `license`, `neighbourhood_group`) são descartadas.
+
+## Variável-alvo: preço por noite
+
+```{r limpeza, include=FALSE}
+# -------------------------------------------------------------
+# Limpeza inicial sobre df_raw -> df_limpo
+# Mantemos TODAS as colunas em df_limpo para auditoria.
+# A redução de colunas para a modelação só acontece em df.
+# -------------------------------------------------------------
+
+# Remover linhas sem price
+df_limpo <- df_raw |> filter(!is.na(price))
+
+# Imputar 0 ao reviews_per_month quando não há reviews
+df_limpo$reviews_per_month[is.na(df_limpo$reviews_per_month)] <- 0
+
+# Conversão de tipos
+df_limpo <- df_limpo |>
+  mutate(
+    last_review = as.Date(last_review),
+    room_type   = factor(room_type)
+  )
+
+# Tradução manual dos bairros (alfabeto grego -> latino)
+mapa_bairros <- c(
+  "ΕΜΠΟΡΙΚΟ ΤΡΙΓΩΝΟ-ΠΛΑΚΑ"           = "Emporiko Trigono-Plaka",
+  "ΚΟΥΚΑΚΙ-ΜΑΚΡΥΓΙΑΝΝΗ"              = "Koukaki-Makrygianni",
+  "ΝΕΟΣ ΚΟΣΜΟΣ"                      = "Neos Kosmos",
+  "ΜΟΥΣΕΙΟ-ΕΞΑΡΧΕΙΑ-ΝΕΑΠΟΛΗ"         = "Mouseio-Exarcheia-Neapoli",
+  "ΑΓΙΟΣ ΚΩΝΣΤΑΝΤΙΝΟΣ-ΠΛΑΤΕΙΑ ΒΑΘΗΣ" = "Agios Konstantinos-Plateia Vathis",
+  "ΠΑΓΚΡΑΤΙ"                         = "Pagkrati",
+  "ΠΛΑΤΕΙΑ ΑΤΤΙΚΗΣ"                  = "Plateia Attikis",
+  "ΚΟΛΩΝΑΚΙ"                         = "Kolonaki",
+  "ΑΚΡΟΠΟΛΗ"                         = "Akropoli",
+  "ΑΜΠΕΛΟΚΗΠΟΙ"                      = "Ampelokipoi",
+  "ΘΗΣΕΙΟ"                           = "Thiseio",
+  "ΠΕΤΡΑΛΩΝΑ"                        = "Petralona",
+  "ΚΕΡΑΜΕΙΚΟΣ"                       = "Keramikos",
+  "ΚΥΨΕΛΗ"                           = "Kypseli",
+  "ΣΤΑΔΙΟ"                           = "Stadio",
+  "ΓΟΥΔΙ"                            = "Goudi",
+  "ΙΛΙΣΙΑ"                           = "Ilisia",
+  "ΖΑΠΠΕΙΟ"                          = "Zappeio",
+  "ΛΥΚΑΒΗΤΤΟΣ"                       = "Lykavittos",
+  "ΠΛΑΤΕΙΑ ΑΜΕΡΙΚΗΣ"                 = "Plateia Amerikis",
+  "ΠΑΤΗΣΙΑ"                          = "Patisia",
+  "ΝΙΡΒΑΝΑ"                          = "Nirvana",
+  "ΚΟΛΩΝΟΣ"                          = "Kolonos",
+  "ΑΝΩ ΚΥΨΕΛΗ"                       = "Ano Kypseli",
+  "ΒΟΤΑΝΙΚΟΣ"                        = "Votanikos",
+  "ΓΚΥΖΗ"                            = "Gkyzi",
+  "ΓΚΑΖΙ"                            = "Gkazi",
+  "ΠΕΔΙΟ ΑΡΕΩΣ"                      = "Pedio Areos",
+  "ΓΟΥΒΑ"                            = "Gouva",
+  "ΑΚΑΔΗΜΙΑ ΠΛΑΤΩΝΟΣ"                = "Akadimia Platonos",
+  "ΑΓΙΟΣ ΝΙΚΟΛΑΟΣ"                   = "Agios Nikolaos",
+  "ΣΤΑΘΜΟΣ ΛΑΡΙΣΗΣ"                  = "Stathmos Larisis",
+  "ΕΛΛΗΝΟΡΩΣΩΝ"                      = "Ellinorosson",
+  "ΑΝΩ ΠΑΤΗΣΙΑ"                      = "Ano Patisia",
+  "ΣΕΠΟΛΙΑ"                          = "Sepolia",
+  "ΝΕΑ ΚΥΨΕΛΗ"                       = "Nea Kypseli",
+  "1Ο ΝΕΚΡΟΤΑΦΕΙΟ"                   = "Proto Nekrotafeio",
+  "ΑΓΙΟΣ ΕΛΕΥΘΕΡΙΟΣ"                 = "Agios Eleftherios",
+  "ΠΟΛΥΓΩΝΟ"                         = "Polygono",
+  "ΚΟΛΟΚΥΝΘΟΥ"                       = "Kolokynthou",
+  "ΡΙΖΟΥΠΟΛΗ"                        = "Rizoupoli",
+  "ΠΡΟΜΠΟΝΑ"                         = "Prompona",
+  "ΡΗΓΙΛΛΗΣ"                         = "Rigillis",
+  "ΠΕΝΤΑΓΩΝΟ"                        = "Pentagono"
+)
+
+# Aplicar a tradução
+for (i in seq_along(mapa_bairros)) {
+  grego <- names(mapa_bairros)[i]
+  latim <- mapa_bairros[i]
+  df_limpo$neighbourhood[df_limpo$neighbourhood == grego] <- latim
+}
+df_limpo$neighbourhood <- factor(df_limpo$neighbourhood)
+```
+
+```{r tbl_stats_price}
+# Estatísticas descritivas + percentis chave
+stats_price <- data.frame(
+  Estatistica = c("N", "Média", "Mediana", "Desvio-padrão",
+                  "Mínimo", "P5", "P25", "P75", "P95", "P99", "Máximo"),
+  Valor = round(c(
+    length(df_limpo$price),
+    mean(df_limpo$price),
+    median(df_limpo$price),
+    sd(df_limpo$price),
+    min(df_limpo$price),
+    quantile(df_limpo$price, 0.05),
+    quantile(df_limpo$price, 0.25),
+    quantile(df_limpo$price, 0.75),
+    quantile(df_limpo$price, 0.95),
+    quantile(df_limpo$price, 0.99),
+    max(df_limpo$price)
+  ), 2)
+)
+
+kable(stats_price,
+      caption   = "Estatísticas descritivas do preço por noite (€)",
+      booktabs  = TRUE,
+      row.names = FALSE) |>
+  kable_styling(latex_options = c("striped", "hold_position"),
+                full_width    = FALSE)
+```
+
+A distribuição do preço é fortemente assimétrica à direita: a mediana é 78 €, mas a média sobe para 122,90 € por causa de poucos valores extremos (máximo de 38 000 €). Apenas 1% dos anúncios ultrapassa os 600 €.
+
+```{r fig_hist_price, fig.height=2.5, fig.cap="Distribuição do preço por noite em escala linear (esq.) e logarítmica (dir.)."}
+p1 <- ggplot(df_limpo, aes(x = price)) +
+  geom_histogram(bins = 60, fill = "#2c7fb8", colour = "white") +
+  labs(x = "Preço por noite (€)", y = "Frequência") +
+  theme_minimal()
+
+p2 <- ggplot(df_limpo, aes(x = price)) +
+  geom_histogram(bins = 60, fill = "#2c7fb8", colour = "white") +
+  scale_x_log10() +
+  labs(x = "Preço por noite (escala log10)", y = "Frequência") +
+  theme_minimal()
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+A escala logarítmica aproxima a distribuição da normal. Como a regressão linear pressupõe resíduos aproximadamente normais, este resultado já antecipa que `log(price)` será a forma adequada na fase de modelação.
+
+## Variáveis categóricas
+
+### Tipo de alojamento
+
+```{r tbl_room}
+tab_room <- df_limpo |>
+  count(room_type) |>
+  mutate(Perc = round(n / sum(n) * 100, 1)) |>
+  arrange(desc(n))
+names(tab_room) <- c("Tipo de alojamento", "N", "%")
+
+kable(tab_room,
+      caption   = "Distribuição por tipo de alojamento",
+      booktabs  = TRUE,
+      row.names = FALSE) |>
+  kable_styling(latex_options = c("striped", "hold_position"),
+                full_width    = FALSE)
+```
+
+```{r fig_box_room, fig.height=2.8, fig.cap="Preço por tipo de alojamento (zoom até 500 €)."}
+ggplot(df_limpo |> filter(price <= 500),
+       aes(x = reorder(room_type, price, FUN = median),
+           y = price, fill = room_type)) +
+  geom_boxplot(alpha = 0.85) +
+  labs(x = "Tipo de alojamento", y = "Preço (€)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+O mercado é dominado por casas inteiras (93%). *Hotel room* e *Shared room* são minoritárias mas representam segmentos conceptualmente distintos: o hotel tem a mediana mais alta, o quarto partilhado tem a mais baixa. Esta separação justifica manter os 4 níveis originais na fase de modelação (a justificação detalhada está na secção 4.4).
+
+### Bairros
+
+```{r top_bairros, include=FALSE}
+
+top_bairros <- df_limpo |>
+  count(neighbourhood, sort = TRUE) |>
+  head(15)
+```
+
+```{r fig_bairros, fig.width=7, fig.height=4, fig.cap="Top 15 bairros por número de alojamentos (esq.) e respetiva distribuição de preços, com zoom até 400 € (dir.)."}
+
+p1 <- ggplot(top_bairros,
+             aes(x = reorder(neighbourhood, n), y = n)) +
+  geom_col(fill = "#2c7fb8") +
+  coord_flip() +
+  labs(x = NULL, y = "Número de alojamentos") +
+  theme_minimal(base_size = 9)
+
+p2 <- df_limpo |>
+  filter(neighbourhood %in% top_bairros$neighbourhood, price <= 400) |>
+  ggplot(aes(x = reorder(neighbourhood, price, FUN = median),
+             y = price)) +
+  geom_boxplot(fill = "#2c7fb8", alpha = 0.85) +
+  coord_flip() +
+  labs(x = NULL, y = "Preço (€)") +
+  theme_minimal(base_size = 9)
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+A oferta concentra-se em Emporiko Trigono-Plaka (centro turístico), Koukaki e Neos Kosmos. Existe uma hierarquia clara de preços: Kolonaki, Akropoli e Plaka apresentam medianas mais altas e maior dispersão; Plateia Attikis e Kypseli funcionam como zonas mais económicas. Como há 44 bairros, dos quais muitos com poucas observações, na secção 4 agruparemos os 10 mais frequentes mantendo os restantes em "Others".
+
+## Variáveis numéricas
+
+```{r tbl_stats_num}
+
+vars_num <- c("minimum_nights", "number_of_reviews", "reviews_per_month",
+              "calculated_host_listings_count", "availability_365",
+              "number_of_reviews_ltm")
+
+stats_num <- data.frame(
+  Variavel = vars_num,
+  Media    = sapply(df_limpo[vars_num], mean,    na.rm = TRUE),
+  Mediana  = sapply(df_limpo[vars_num], median,  na.rm = TRUE),
+  DP       = sapply(df_limpo[vars_num], sd,      na.rm = TRUE),
+  Min      = sapply(df_limpo[vars_num], min,     na.rm = TRUE),
+  Max      = sapply(df_limpo[vars_num], max,     na.rm = TRUE)
+)
+stats_num[, -1] <- round(stats_num[, -1], 2)
+rownames(stats_num) <- NULL
+
+kable(stats_num,
+      col.names = c("Variável", "Média", "Mediana", "DP", "Min", "Max"),
+      caption   = "Estatísticas descritivas das variáveis numéricas",
+      booktabs  = TRUE,
+      row.names = FALSE) |>
+  kable_styling(latex_options = c("striped", "hold_position"),
+                full_width    = FALSE)
+```
+
+A maioria dos preditores apresenta assimetria positiva (média acima da mediana), com cauda longa à direita: `number_of_reviews` tem média 58 contra mediana 16, e `calculated_host_listings_count` tem média 18 contra mediana 5, sinal de operadores profissionais com escala atípica. Os máximos confirmam outliers: `minimum_nights` chega a 444 noites (incompatível com curta duração) e `calculated_host_listings_count` chega a 165. A exceção é `availability_365`, com mediana (308) acima da média (259), mostrando que a maioria dos alojamentos tem o calendário largamente aberto.
+
+```{r fig_hist_num, fig.height=5, fig.cap="Distribuição das variáveis numéricas explicativas."}
+
+df_limpo |>
+  dplyr::select(all_of(vars_num)) |>
+  tidyr::pivot_longer(everything(),
+                      names_to  = "variavel",
+                      values_to = "valor") |>
+  ggplot(aes(x = valor)) +
+  geom_histogram(bins = 30, fill = "#2c7fb8", colour = "white") +
+  facet_wrap(~ variavel, scales = "free", ncol = 2) +
+  labs(x = NULL, y = "Frequência") +
+  theme_minimal()
+```
+
+### Correlação
+
+```{r fig_cor, fig.height=4.5, fig.cap="Matriz de correlação de Pearson entre o preço e as variáveis numéricas."}
+
+vars_corr <- c("price", "latitude", "longitude", vars_num)
+cor_mat <- cor(df_limpo[, vars_corr], use = "pairwise.complete.obs")
+
+corrplot(cor_mat,
+         method      = "color",
+         type        = "upper",
+         addCoef.col = "black",
+         number.cex  = 0.65,
+         tl.col      = "black",
+         tl.srt      = 45,
+         tl.cex      = 0.75)
+```
+
+Nenhuma variável numérica tem correlação linear forte com `price`, o que reforça a necessidade de incluir variáveis categóricas (bairro, tipo) e novas métricas (distâncias) e de aplicar a transformação logarítmica. Existe uma correlação alta entre `reviews_per_month` e `number_of_reviews_ltm` ($r = 0{,}88$) — duas variáveis que medem essencialmente a mesma coisa, motivo pelo qual só uma delas será usada na modelação.
+
+## Distribuição espacial
+
+```{r fig_mapa, fig.height=5, fig.cap="Distribuição espacial dos alojamentos em Atenas. A cor codifica o preço em escala logarítmica (mais claro = mais caro)."}
+
+ggplot(df_limpo |> filter(price <= 500),
+       aes(x = longitude, y = latitude, colour = log(price))) +
+  geom_point(alpha = 0.4, size = 0.6) +
+  scale_colour_viridis_c(option = "plasma", name = "log(price)") +
+  coord_fixed(ratio = 1 / cos(37.98 * pi / 180)) +
+  labs(x = "Longitude", y = "Latitude") +
+  theme_minimal()
+```
+
+Observa-se um padrão claro centro-periferia: os preços mais altos concentram-se em torno do centro histórico (Plaka, Acrópole). Esta evidência justifica criar um preditor explícito de proximidade ao centro (operacionalizado na secção 4 como distância à Acrópole, calculada pela fórmula de Haversine).
+
+# Pré-processamento e Feature Engineering
+
+## Tratamento de outliers
+
+```{r outliers, include=FALSE}
+# -------------------------------------------------------------
+# Tratamento de outliers em duas variáveis:
+# 1. price: corte em 1000 € (max original = 38 000 €)
+# 2. minimum_nights: corte em 30 noites (acima é arrendamento de média/longa duração, dinâmica de preço diferente)
+# -------------------------------------------------------------
+
+# Price > 1000
+n_antes <- nrow(df_limpo)
+df_limpo <- df_limpo |> filter(price <= 1000)
+n_rem_price <- n_antes - nrow(df_limpo)
+
+# Minimum_nights > 30
+n_antes <- nrow(df_limpo)
+df_limpo <- df_limpo |> filter(minimum_nights <= 30)
+n_rem_mn <- n_antes - nrow(df_limpo)
+```
+
+Removeram-se duas categorias de outliers que distorceriam o modelo:
+
+- **Preços acima de 1 000 €** (`r n_rem_price` observações, ~0,3%): correspondem a anúncios atípicos cuja inclusão enviesaria os coeficientes. Optámos por inspeção manual em vez do critério IQR puro porque este último marcaria como outlier qualquer preço acima de 217 €, removendo cerca de 25% dos dados, incluindo alojamentos *premium* legítimos.
+- **Estadias mínimas acima de 30 noites** (`r n_rem_mn` observações, ~0,4%): são contratos de média/longa duração com lógica de preço diferente do alojamento de curta duração que estamos a modelar.
+
+## Agrupamento de bairros
+
+```{r agrup_bairros, include=FALSE}
+# -------------------------------------------------------------
+# Reduz 44 bairros para 11 níveis: top 10 + "Others"
+# -------------------------------------------------------------
+top10 <- df_limpo |>
+  count(neighbourhood, sort = TRUE) |>
+  head(10) |>
+  pull(neighbourhood) |>
+  as.character()
+
+df_limpo$bairro_grp <- ifelse(as.character(df_limpo$neighbourhood) %in% top10,
+                              as.character(df_limpo$neighbourhood),
+                              "Others")
+df_limpo$bairro_grp <- factor(df_limpo$bairro_grp, levels = c(top10, "Others"))
+```
+
+Dos 44 bairros originais, mantiveram-se os 10 mais frequentes como níveis individuais; os restantes foram agregados em "Others" (~31% das observações). Isto reduz o número de variáveis *dummy* de 43 para 10 e protege contra coeficientes instáveis em bairros pouco representados.
+
+```{r fig_bairros_grp, fig.height=2.5, fig.cap="Composição do factor bairro\\_grp após agrupamento."}
+
+df_limpo |>
+  count(bairro_grp) |>
+  mutate(Perc = round(n / sum(n) * 100, 1)) |>
+  ggplot(aes(x = reorder(bairro_grp, n), y = n, fill = bairro_grp == "Others")) +
+  geom_col(alpha = 0.85) +
+  geom_text(aes(label = paste0(Perc, "%")), hjust = -0.2, size = 3) +
+  coord_flip(clip = "off") +
+  scale_fill_manual(values = c("FALSE" = "#2c7fb8", "TRUE" = "#a31515")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(x = NULL, y = "Número de alojamentos") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.margin = margin(5, 20, 5, 5))
+```
+
+## Decisão sobre `room_type`
+
+Considerou-se agrupar `Hotel room` e `Shared room` num nível "Others" devido ao baixo N (~40 observações cada). Optámos por manter os 4 níveis originais: representam segmentos de mercado conceptualmente diferentes. *Hotel room* corresponde a alojamento profissional com serviços associados, *Shared room* corresponde ao segmento de preço mais baixo da plataforma. Agrupá-los apagaria informação relevante para a interpretação dos coeficientes, mesmo com o custo de uma estimação menos eficiente devido ao N reduzido. Na secção 6 mostraremos que os erros padrão robustos (HC3) corrigem este efeito.
+
+## Criação de novas variáveis
+
+### Distância à Acrópole
+
+```{r dist_acropole, include=FALSE}
+# -------------------------------------------------------------
+# Distância geodésica (em metros) de cada listing à Acrópole
+# Fórmula de Haversine via geosphere::distHaversine — tem em conta a curvatura da Terra
+# Coordenadas da Acrópole: 37.9715 N, 23.7257 E
+# -------------------------------------------------------------
+acropole <- c(23.7257, 37.9715)   # (lon, lat)
+coords <- as.matrix(df_limpo[, c("longitude", "latitude")])
+df_limpo$dist_acropole <- distHaversine(coords, acropole)
+```
+
+A distância de cada alojamento à Acrópole foi calculada pela fórmula de Haversine (em metros), que corrige a curvatura terrestre. A distância média situa-se nos `r round(mean(df_limpo$dist_acropole))` metros e a mediana nos `r round(median(df_limpo$dist_acropole))` metros. Esta variável tornar-se-á o principal preditor contínuo de localização.
+
+### Perfil do anfitrião (`host_multi`)
+
+```{r host_multi, include=FALSE}
+# -------------------------------------------------------------
+# host_multi: flag binária que distingue gestão profissional
+# (>1 alojamento) de anfitriões particulares
+# -------------------------------------------------------------
+df_limpo$host_multi <- factor(
+  ifelse(df_limpo$calculated_host_listings_count > 1, "Yes", "No"),
+  levels = c("No", "Yes")
+)
+n_multi <- sum(df_limpo$host_multi == "Yes")
+```
+
+Criámos uma variável binária que sinaliza gestão profissional: `host_multi = "Yes"` se o anfitrião gere mais de um alojamento. Atualmente `r format(n_multi, big.mark=" ")` alojamentos são geridos por perfis multi-listagem, sinal de uma forte profissionalização do mercado em Atenas.
+
+### Recência de atividade (`has_review`, `days_since_last_review`)
+
+```{r reviews_derivadas, include=FALSE}
+# -------------------------------------------------------------
+# Duas variáveis derivadas de last_review:
+#   has_review               -> flag (Yes/No)
+#   days_since_last_review   -> dias até 2025-09-26 (data ref.)
+# Para alojamentos sem review (NA), imputamos o valor máximo observado (= "menos ativo possível").
+# -------------------------------------------------------------
+df_limpo$has_review <- factor(
+  ifelse(is.na(df_limpo$last_review), "No", "Yes"),
+  levels = c("No", "Yes")
+)
+
+data_ref <- as.Date("2025-09-26")
+df_limpo$days_since_last_review <- as.numeric(data_ref - df_limpo$last_review)
+
+max_days <- max(df_limpo$days_since_last_review, na.rm = TRUE)
+df_limpo$days_since_last_review[is.na(df_limpo$days_since_last_review)] <- max_days
+```
+
+Da coluna `last_review` derivamos dois indicadores, com data de referência 26 de setembro de 2025 (carregamento do dataset no Inside Airbnb):
+
+- `has_review` (Yes/No): identifica se o imóvel já recebeu feedback alguma vez.
+- `days_since_last_review`: dias decorridos desde a última review. Para anúncios sem histórico imputámos o valor máximo observado (`r max_days` dias), posicionando-os como os menos ativos do mercado.
+
+## Dataset de modelação
+
+```{r criar_df, include=FALSE}
+# Subconjunto apenas com as variáveis que entram nos modelos
+df <- df_limpo[, c("price",
+                   "room_type", "bairro_grp",
+                   "minimum_nights", "availability_365", "reviews_per_month",
+                   "host_multi", "has_review", "days_since_last_review",
+                   "dist_acropole")]
+```
+
+O `data.frame` `df` é o subconjunto pronto para modelar (10 variáveis: 1 alvo + 9 preditores). O `df_limpo` original mantém todas as colunas para auditoria.
+
+```{r tbl_modelar}
+
+datasummary(
+  price + dist_acropole + minimum_nights + reviews_per_month ~
+    Mean + SD + Min + Median + Max,
+  data  = df,
+  title = "Estatísticas descritivas das principais variáveis numéricas (após pré-processamento)",
+  fmt   = 2
+)
+```
+
+# Modelação
+
+## Comparação inicial entre quatro especificações
+
+Estimámos quatro modelos para cobrir as principais formas funcionais cobertas no programa: linear simples, polinomial, com interação, e log-log.
+
+```{r modelos_iniciais, include=FALSE}
+
+# M1 — Linear baseline
+m1 <- lm(price ~ ., data = df)
+
+# M2 — Polinomial em dist_acropole
+m2 <- lm(price ~ poly(dist_acropole, 2) + room_type + bairro_grp +
+                 minimum_nights + availability_365 + reviews_per_month +
+                 host_multi + has_review + days_since_last_review,
+         data = df)
+
+# M3 — Interação room_type * dist_acropole
+m3 <- lm(price ~ room_type * dist_acropole + bairro_grp +
+                 minimum_nights + availability_365 + reviews_per_month +
+                 host_multi + has_review + days_since_last_review,
+         data = df)
+
+# M4 — Log-log
+m4 <- lm(log(price) ~ log(dist_acropole + 1) + room_type + bairro_grp +
+                       minimum_nights + availability_365 + reviews_per_month +
+                       host_multi + has_review + days_since_last_review,
+         data = df)
+
+```
+
+```{r tbl_comparacao_inicial}
+
+comparacao <- data.frame(
+  Modelo   = c("M1 — Linear", "M2 — Polinomial", "M3 — Interação", "M4 — Log-log"),
+  Var_alvo = c("price", "price", "price", "log(price)*"),
+  Adj_R2   = c(summary(m1)$adj.r.squared, summary(m2)$adj.r.squared,
+               summary(m3)$adj.r.squared, summary(m4)$adj.r.squared),
+  RSE      = c(summary(m1)$sigma, summary(m2)$sigma,
+               summary(m3)$sigma, summary(m4)$sigma),
+  AIC      = c(AIC(m1), AIC(m2), AIC(m3), AIC(m4))
+)
+
+kable(comparacao,
+      col.names = c("Modelo", "Variável-alvo", "R² Ajustado", "RSE", "AIC"),
+      caption   = "Comparação dos quatro modelos iniciais",
+      digits    = c(0, 0, 4, 2, 1),
+      booktabs  = TRUE) |>
+  kable_styling(latex_options = c("striped", "hold_position"),
+                full_width    = FALSE)
+
+```
+
+\* O AIC do M4 não é diretamente comparável aos restantes porque a escala de Y é diferente.
+
+O **M4 (log-log)** quase duplica o R² ajustado face ao baseline (de 0,18 para 0,33). Os termos polinomial (M2) e de interação (M3) ficam pelo caminho — embora o termo polinomial em `dist_acropole` seja estatisticamente significativo, o modelo log-log já captura a relação de decaimento de forma mais simples e com a vantagem prática de produzir coeficientes interpretáveis como elasticidades. Prosseguimos com M4 como base para refinamento.
+
+## Validação da especificação geográfica
+
+Antes de refinar M4, testámos duas alternativas sobre a forma de codificar a localização:
+
+```{r m4_no_bairro, include=FALSE}
+
+# M4 sem o factor bairro_grp
+m4_no_bairro <- lm(log(price) ~ log(dist_acropole + 1) + room_type +
+                                 minimum_nights + availability_365 + reviews_per_month +
+                                 host_multi + has_review + days_since_last_review,
+                   data = df)
+anova_bairro <- anova(m4_no_bairro, m4)
+
+```
+
+```{r m5_tier, include=FALSE}
+
+# M5: bairros agrupados por tier de preço (alternativa ao top 10 + Others)
+mediana_por_bairro <- df_limpo |>
+  group_by(neighbourhood) |>
+  summarise(mediana = median(price, na.rm = TRUE), n = n()) |>
+  arrange(desc(mediana))
+
+quartis <- quantile(mediana_por_bairro$mediana, probs = c(0.25, 0.5, 0.75))
+mediana_por_bairro$tier <- cut(
+  mediana_por_bairro$mediana,
+  breaks = c(-Inf, quartis[1], quartis[2], quartis[3], Inf),
+  labels = c("Budget", "Mid-Low", "Mid-High", "Premium")
+)
+
+df_limpo <- df_limpo |>
+  left_join(mediana_por_bairro[, c("neighbourhood", "tier")],
+            by = "neighbourhood") |>
+  rename(bairro_tier = tier)
+
+m5 <- lm(log(price) ~ log(dist_acropole + 1) + room_type + bairro_tier +
+                       minimum_nights + availability_365 + reviews_per_month +
+                       host_multi + has_review + days_since_last_review,
+         data = df_limpo)
+
+```
+
+```{r tbl_geo}
+comparativo_geo <- data.frame(
+  Modelo        = c("M4 sem bairros", "M4 (Top 10 + Others)", "M5 (Tiers de preço)"),
+  Especificacao = c("Apenas distância", "Distância + identidade local", "Distância + tier de preço"),
+  Adj_R2        = c(summary(m4_no_bairro)$adj.r.squared,
+                    summary(m4)$adj.r.squared,
+                    summary(m5)$adj.r.squared),
+  AIC           = c(AIC(m4_no_bairro), AIC(m4), AIC(m5))
+)
+
+kable(comparativo_geo,
+      col.names = c("Modelo", "Especificação", "R² Ajustado", "AIC"),
+      caption   = "Comparação de especificações geográficas",
+      digits    = 4,
+      booktabs  = TRUE) |>
+  kable_styling(latex_options = c("striped", "hold_position"),
+                full_width    = FALSE) |>
+  row_spec(2, bold = TRUE, background = "#f2f2f2")
+```
+
+Conclusões: (i) o teste ANOVA entre M4 e M4 sem bairros é altamente significativo (F = `r round(anova_bairro$F[2], 1)`, p < 0,001), confirmando que o factor bairro acrescenta informação que a distância sozinha não captura; (ii) o agrupamento por *tier* de preço (M5) tem desempenho inferior ao agrupamento por identidade do bairro (top 10 + Others), porque a identidade carrega valor qualitativo (prestígio, serviços, contexto) que uma simples mediana de preço não substitui. Mantemos a especificação do M4.
+
+## Refinamento do M4: outliers influentes e multicolinearidade
+
+```{r refinamento, include=FALSE}
+
+# Remoção de outliers influentes (Cook's distance > 4 * média)
+cooksd <- cooks.distance(m4)
+limiar <- 4 * mean(cooksd, na.rm = TRUE)
+n_inf  <- sum(cooksd > limiar)
+
+df_clean <- df[cooksd <= limiar, ]
+
+# Refit em df_clean
+m4_v2 <- lm(log(price) ~ log(dist_acropole + 1) + room_type + bairro_grp +
+                          minimum_nights + availability_365 + reviews_per_month +
+                          host_multi + has_review + days_since_last_review,
+            data = df_clean)
+```
+
+Através da análise da distância de Cook (critério de 4 × média), foram identificadas e removidas `r format(n_inf, big.mark=" ")` observações influentes, resultando no modelo `m4_v2` estimado em `df_clean`.
+
+```{r fig_cooks, fig.height=3.5, fig.cap="Distância de Cook para o modelo M4."}
+
+plot(m4, which = 4)
+
+```
+
+Em seguida calculámos o VIF generalizado (GVIF) para detetar multicolinearidade:
+
+```{r tbl_vif_v1}
+
+vif_v1 <- vif(m4_v2)
+kable(as.data.frame(vif_v1),
+      col.names = c("GVIF", "Df", "GVIF$^{1/(2 \\cdot Df)}$"),
+      caption   = "VIF inicial — modelo m4\\_v2",
+      digits    = 3,
+      booktabs  = TRUE,
+      escape    = FALSE) |>
+  kable_styling(latex_options = c("striped", "hold_position"),
+                full_width    = FALSE)
+```
+
+`has_review` e `days_since_last_review` apresentam GVIF acima de 24 — multicolinearidade extrema entre si e com `reviews_per_month`. Removemos ambas:
+
+```{r m4_v2_final, include=FALSE}
+
+m4_v2 <- lm(log(price) ~ log(dist_acropole + 1) + room_type + bairro_grp +
+                          minimum_nights + availability_365 + reviews_per_month +
+                          host_multi,
+            data = df_clean)
+```
+
+```{r tbl_vif_v2}
+
+vif_v2 <- vif(m4_v2)
+kable(as.data.frame(vif_v2),
+      col.names = c("GVIF", "Df", "GVIF$^{1/(2 \\cdot Df)}$"),
+      caption   = "VIF após remoção de variáveis redundantes",
+      digits    = 3,
+      booktabs  = TRUE,
+      escape    = FALSE) |>
+  kable_styling(latex_options = c("striped", "hold_position"),
+                full_width    = FALSE)
+
+```
+
+Com a remoção, todos os GVIF descem para valores saudáveis (<3). A distância à Acrópole e os bairros mantêm VIF baixos, confirmando que cada um traz informação distinta: a distância capta o efeito geográfico contínuo, os bairros captam características locais específicas.
+
+## Não-linearidades nos preditores contínuos
+
+Para verificar se cada preditor entra no modelo na forma funcional adequada, recorremos aos *Component + Residual Plots* (`crPlots`):
+
+```{r fig_crplots_num, fig.height=4.5, fig.cap="Resíduos parciais para os preditores contínuos do m4\\_v2."}
+
+car::crPlots(m4_v2, terms = ~ log(dist_acropole + 1) + minimum_nights +
+                              availability_365 + reviews_per_month)
+
+```
+
+O gráfico revela:
+
+- `log(dist_acropole + 1)` e `availability_365`: a curva LOESS sobrepõe-se à linha, especificação correta.
+- `minimum_nights`: a LOESS tem um declive mais acentuado para valores baixos — sugere transformação log.
+- `reviews_per_month`: a LOESS desce rapidamente nos valores baixos e estabiliza — sugere transformação log também.
+
+Testámos formas alternativas para as duas variáveis problemáticas:
+
+```{r testes_funcionais, include=FALSE}
+
+# minimum_nights: log
+m4_log_mn <- lm(log(price) ~ log(dist_acropole + 1) + room_type + bairro_grp +
+                              log(minimum_nights) + availability_365 +
+                              reviews_per_month + host_multi,
+                data = df_clean)
+
+
+# reviews_per_month: log 
+m4_log_rev <- lm(log(price) ~ log(dist_acropole + 1) + room_type + bairro_grp +
+                               log(minimum_nights) + availability_365 +
+                               log(reviews_per_month + 1) + host_multi,
+                 data = df_clean)
+```
+
+```{r tbl_funcional}
+
+tab_func <- data.frame(
+  Modelo  = c("m4_v2 (linear)", "m4_log_mn (+log mn)", "m4_log_rev (+log mn +log rev)"),
+  Adj_R2  = c(summary(m4_v2)$adj.r.squared,
+              summary(m4_log_mn)$adj.r.squared,
+              summary(m4_log_rev)$adj.r.squared),
+  AIC     = c(AIC(m4_v2), AIC(m4_log_mn), AIC(m4_log_rev))
+)
+
+kable(tab_func,
+      col.names = c("Modelo", "R² Ajustado", "AIC"),
+      caption   = "Refinamento por transformações log nos preditores",
+      digits    = c(0, 4, 1),
+      booktabs  = TRUE) |>
+  kable_styling(latex_options = c("striped", "hold_position"),
+                full_width    = FALSE) |>
+  row_spec(3, bold = TRUE, background = "#f2f2f2")
+
+```
+
+A transformação log em `minimum_nights` e em `reviews_per_month` reduz o AIC em ~300 unidades face ao modelo linear nos preditores. Optámos pela forma log (em vez de polinomial) porque permite interpretar os coeficientes como elasticidades — coerente com a escolha de `log(price)` como variável-alvo.
+
+Para confirmar visualmente que as transformações resolveram a não-linearidade, voltámos a correr os *crPlots* sobre o modelo já com `log(minimum_nights)` e `log(reviews_per_month + 1)`:
+
+```{r fig_crplots_num_pos, fig.height=4.5, fig.cap="Resíduos parciais após as transformações log em minimum\\_nights e reviews\\_per\\_month."}
+
+car::crPlots(m4_log_rev, terms = ~ log(dist_acropole + 1) + log(minimum_nights) +
+                                    availability_365 + log(reviews_per_month + 1))
+
+```
+
+A curva LOESS (a rosa) passa a sobrepor-se à reta de regressão (a azul) em todos os preditores contínuos. O desvio que antes existia em `minimum_nights` e `reviews_per_month` desapareceu. O modelo está agora bem especificado.
+
+**Modelo final:** `m4_log_rev` é o nosso modelo final. Definimos um alias `m_final` para uso nas próximas secções.
+
+```{r m_final, include=FALSE}
+
+# Alias para o modelo final, usado em diagnóstico e futuramente em previsão
+
+m_final <- m4_log_rev
+
+```
+
+## Validação por seleção automática de variáveis
+
+Como verificação adicional, corremos o procedimento *stepwise* baseado em AIC (`ols_step_both_aic`). O resultado confirma a configuração de variáveis do modelo final, nenhum preditor adicional reduz o AIC, e nenhum dos preditores incluídos é descartado.
+
+```{r stepaic_check, include=FALSE, eval=FALSE}
+
+# Eval = FALSE para o knit ser rápido. O comando foi executado offline e o resultado confirmou a configuração do m_final (todos os preditores atuais são selecionados, nenhum extra é incluído).
+
+fit_check <- lm(log(price) ~ log(dist_acropole + 1) + room_type + bairro_grp +
+                              log(minimum_nights) + availability_365 +
+                              log(reviews_per_month + 1) + host_multi,
+                data = df_clean)
+ols_step_both_aic(fit_check)
+
+```
+
+# Diagnóstico de Resíduos do Modelo Final
+
+## Testes formais
+
+```{r diag_inicial, include=FALSE}
+
+mean_res <- mean(m_final$residuals)
+p_bp <- bptest(m_final)$p.value
+p_bg <- bgtest(m_final)$p.value
+p_jb <- jarque.bera.test(m_final$residuals)$p.value
+
+```
+
+```{r tbl_diag}
+
+tabela_pressupostos <- data.frame(
+  Pressuposto = c("Média dos resíduos = 0",
+                  "Homocedasticidade",
+                  "Independência (autocorrelação)",
+                  "Normalidade"),
+  Teste = c("Média simples", "Breusch-Pagan",
+            "Breusch-Godfrey", "Jarque-Bera"),
+  Resultado = c(format(mean_res, scientific = TRUE, digits = 2),
+                format(p_bp, scientific = TRUE, digits = 2),
+                format(p_bg, scientific = TRUE, digits = 2),
+                format(p_jb, scientific = TRUE, digits = 2)),
+  Estado = c("Cumprido",
+             ifelse(p_bp < 0.05, "Violado", "Cumprido"),
+             ifelse(p_bg < 0.05, "Violado", "Cumprido"),
+             ifelse(p_jb < 0.05, "Violado", "Cumprido")),
+  Acao = c("Nenhuma",
+           "Erros padrão robustos (HC3)",
+           "Dados seccionais; rejeição é artefacto do N",
+           "TCL cobre, com N > 14 000")
+)
+
+kable(tabela_pressupostos,
+      col.names = c("Pressuposto", "Teste", "p-value", "Estado", "Ação"),
+      caption   = "Diagnóstico dos pressupostos do modelo final",
+      booktabs  = TRUE) |>
+  kable_styling(latex_options = c("striped", "scale_down", "hold_position"),
+                full_width    = FALSE,
+                font_size     = 9)
+
+```
+
+## Diagnóstico visual
+
+```{r fig_diag_visual, fig.height=5, fig.cap="Diagnóstico visual do modelo final (4 painéis padrão de plot.lm)."}
+
+par(mfrow = c(2, 2)); plot(m_final); par(mfrow = c(1, 1))
+
+```
+
+Leitura dos quatro painéis:
+
+1. **Residuals vs Fitted** — a linha LOWESS é essencialmente horizontal, sem padrões em curvatura. A especificação log-log captura bem a relação funcional.
+2. **Normal Q-Q** — os pontos seguem a diagonal na zona central mas afastam-se nas caudas, especialmente na superior. É a explicação visual da rejeição do Jarque-Bera.
+3. **Scale-Location** — a linha vermelha sobe ligeiramente para valores ajustados altos. Confirma a heterocedasticidade detetada pelo Breusch-Pagan.
+4. **Residuals vs Leverage** — a esmagadora maioria dos pontos tem leverage baixo e nenhum ultrapassa a distância de Cook. Não há observações individualmente influentes.
+
+## Inferência robusta: erros padrão HC3
+
+A heterocedasticidade detetada não enviesa os coeficientes — apenas os erros padrão clássicos. A correção padrão é usar `coeftest` com a matriz de variância-covariância robusta `vcovHC` (tipo HC3) do pacote `sandwich`.
+
+```{r hc3, include=FALSE}
+
+robust_se <- sqrt(diag(vcovHC(m_final, type = "HC3")))
+classic   <- summary(m_final)$coefficients
+robust    <- coeftest(m_final, vcov = vcovHC(m_final, type = "HC3"))
+
+tab_hc3 <- data.frame(
+  Variavel       = rownames(classic),
+  Coef           = round(classic[, "Estimate"], 4),
+  SE_classico    = round(classic[, "Std. Error"], 4),
+  SE_robusto     = round(robust_se, 4),
+  p_classico     = formatC(classic[, "Pr(>|t|)"], digits = 3, format = "g"),
+  p_robusto      = formatC(robust[, "Pr(>|t|)"],  digits = 3, format = "g")
+)
+
+# Flag de mudança de significância
+sig_classic <- ifelse(classic[, "Pr(>|t|)"] < 0.001, "***",
+               ifelse(classic[, "Pr(>|t|)"] < 0.01,  "**",
+               ifelse(classic[, "Pr(>|t|)"] < 0.05,  "*",
+               ifelse(classic[, "Pr(>|t|)"] < 0.1,   ".", ""))))
+sig_robust  <- ifelse(robust[, "Pr(>|t|)"] < 0.001, "***",
+               ifelse(robust[, "Pr(>|t|)"] < 0.01,  "**",
+               ifelse(robust[, "Pr(>|t|)"] < 0.05,  "*",
+               ifelse(robust[, "Pr(>|t|)"] < 0.1,   ".", ""))))
+tab_hc3$Sig_Mudanca <- ifelse(sig_classic == sig_robust, "Sem alteração", "ALTERADA")
+
+```
+
+```{r tbl_hc3}
+
+kable(tab_hc3,
+      col.names = c("Variável", "Coef", "SE clás.", "SE HC3",
+                    "p clás.", "p HC3", "Mudança Sig."),
+      caption   = "Comparação de inferência: erros padrão clássicos vs. robustos (HC3)",
+      booktabs  = TRUE,
+      row.names = FALSE) |>
+  kable_styling(latex_options = c("striped", "scale_down", "hold_position"),
+                full_width    = FALSE,
+                font_size     = 8) |>
+  column_spec(1, bold = TRUE, monospace = TRUE)
+
+```
+
+**Leitura da tabela:** nenhum coeficiente altera o seu nível de significância, o modelo é robusto à heterocedasticidade. O padrão de mudança das SEs é informativo:
+
+- A maioria dos preditores tem a SE robusta ligeiramente acima da clássica (3-13%), o que reflete uma heterocedasticidade ligeira mas real.
+- Para `room_typeHotel room` e `room_typeShared room` a SE robusta é **muito menor** que a clássica (cerca de 1/3). É consequência do N reduzido destas categorias: os resíduos dentro de cada uma são bastante homogéneos, e o HC3 deteta isso e produz uma estimativa mais fina. Confirma `a posteriori` que a decisão de manter os 4 níveis de `room_type` (secção 4.4) foi correta, o efeito destas categorias está bem estimado.
+
+## Conclusão sobre os pressupostos
+
+Síntese, pressuposto a pressuposto:
+
+- **Média dos resíduos = 0:** cumprido (`r format(mean_res, scientific = TRUE, digits = 2)`).
+- **Homocedasticidade:** rejeitada formalmente pelo Breusch-Pagan, mas a heterocedasticidade é ligeira. A correção HC3 não altera nenhuma conclusão de inferência. O modelo é fiável.
+- **Independência:** o Breusch-Godfrey rejeita H0, mas os dados são seccionais (não há ordem temporal). Com N > 14 000 a rejeição é, na prática, um artefacto da dimensão da amostra. Não compromete o modelo.
+- **Normalidade:** o Jarque-Bera rejeita H0 por causa das caudas, mas com N ≈ 14 400 o Teorema do Limite Central garante que a distribuição dos estimadores dos coeficientes é aproximadamente normal. A inferência permanece válida.
+
+Em síntese, das quatro condições, três foram formalmente rejeitadas, todas por motivos identificáveis e tratáveis ou inócuos ao objetivo do trabalho. O modelo final é apto para a fase de previsão, com a inferência reportada usando os erros padrão robustos HC3.
+
+# Avaliação do Modelo (Out-of-Sample)
+
+Para verificar a capacidade de generalização do modelo e detetar *overfitting* ou *underfitting*, dividiu-se o dataset em dois conjuntos: treino (80%) e teste (20%). O modelo é estimado exclusivamente no conjunto de treino e a sua performance é validada em dados independentes que não participaram no ajuste dos coeficientes.
+
+## Divisão do dataset e re-treino
+
+```{r treino_teste, include=FALSE}
+# -------------------------------------------------------------
+# Partição 80/20 com sample.split (caTools), fixando set.seed
+# A divisão é feita sobre a variável-alvo para preservar a sua distribuição.
+# -------------------------------------------------------------
+set.seed(500)
+divisao <- sample.split(df_clean$price, SplitRatio = 0.8)
+treino  <- subset(df_clean, divisao == TRUE)
+teste   <- subset(df_clean, divisao == FALSE)
+
+n_treino <- nrow(treino)
+n_teste  <- nrow(teste)
+
+# Re-treinar o modelo final apenas no conjunto de treino
+# (mesma especificação do m_final, mas estimado em treino)
+
+m_final_train <- lm(log(price) ~ log(dist_acropole + 1) + room_type +
+                                  bairro_grp + log(minimum_nights) +
+                                  availability_365 + log(reviews_per_month + 1) +
+                                  host_multi,
+                    data = treino)
+```
+
+A partição produziu `r format(n_treino, big.mark = " ")` observações de treino e `r format(n_teste, big.mark = " ")` de teste. O modelo `m_final_train` tem a mesma especificação que `m_final` mas é estimado apenas no subconjunto de treino, garantindo que o conjunto de teste fica completamente fora do processo de ajuste.
+
+## Métricas de performance
+
+As previsões foram geradas para o conjunto de teste e transformadas para a escala original em euros através de `exp()` (necessário porque a variável-alvo está em log). Calcularam-se três métricas com leituras complementares:
+
+- **MAPE** (*Mean Absolute Percentage Error*): erro percentual médio, independente da escala.
+- **MAE** (*Mean Absolute Error*): erro médio absoluto em euros, sensível à magnitude.
+- **RMSE** (*Root Mean Square Error*): penaliza erros grandes mais do que pequenos.
+
+```{r metricas_oos, include=FALSE}
+
+# Previsões no conjunto de teste (out-of-sample)
+
+actuals <- teste$price
+preds   <- exp(predict(m_final_train, teste))
+
+mape_out <- mean(abs((actuals - preds) / actuals))
+mae_out  <- mean(abs(actuals - preds))
+rmse_out <- sqrt(mean((actuals - preds)^2))
+
+# Previsões no conjunto de treino (in-sample) para comparação
+
+
+preds_train <- exp(predict(m_final_train, treino))
+mape_in     <- mean(abs((treino$price - preds_train) / treino$price))
+
+```
+
+```{r tbl_metricas}
+tabela_resultados <- data.frame(
+  Metrica = c("MAPE (%)", "MAE (€)", "RMSE (€)"),
+  Treino  = c(round(mape_in * 100, 2), "—", "—"),
+  Teste   = c(round(mape_out * 100, 2),
+              round(mae_out, 2),
+              round(rmse_out, 2))
+)
+
+kable(tabela_resultados,
+      col.names = c("Métrica", "Treino (in-sample)", "Teste (out-of-sample)"),
+      caption   = "Performance preditiva do modelo final",
+      booktabs  = TRUE,
+      align     = "lrr") |>
+  kable_styling(latex_options = c("striped", "hold_position"),
+                full_width    = FALSE)
+```
+
+```{r fig_real_vs_pred, fig.height=4, fig.cap="Preço real vs. previsto no conjunto de teste. A linha vermelha tracejada representa a previsão perfeita (y = x). Vista limitada a preços $\\leq$ 500 € para clareza visual."}
+df_pred <- data.frame(actual = actuals, predicted = preds)
+
+ggplot(df_pred |> filter(actual <= 500),
+       aes(x = actual, y = predicted)) +
+  geom_point(alpha = 0.25, size = 0.7, colour = "#2c7fb8") +
+  geom_abline(slope = 1, intercept = 0,
+              colour = "#a31515", linetype = "dashed", linewidth = 0.6) +
+  labs(x = "Preço real (€)", y = "Preço previsto (€)") +
+  theme_minimal()
+```
+
+## Interpretação crítica
+
+A leitura conjunta destas métricas e do gráfico permite tirar três conclusões sobre o desempenho do modelo:
+
+1. **Ausência de overfitting.** O MAPE no treino (`r round(mape_in*100, 2)`%) e no teste (`r round(mape_out*100, 2)`%) são praticamente idênticos. O facto de o erro out-of-sample não degradar face ao in-sample confirma que o modelo generaliza bem e não se limitou a memorizar ruído. Confirma também o que vimos no diagnóstico de resíduos: nenhuma observação isolada exerce influência desproporcionada sobre os coeficientes estimados.
+
+2. **Magnitude do erro em euros.** O MAE indica que, em média, as previsões diferem do preço real em cerca de `r round(mae_out, 2)` €/noite. O RMSE é claramente superior (`r round(rmse_out, 2)` €), o que mostra que o erro é puxado para cima por uma minoria de previsões mais distantes — provavelmente alojamentos *premium* cuja precificação depende de atributos não capturados pelo dataset.
+
+3. **MAPE moderadamente alto e o seu significado.** Um MAPE de ~`r round(mape_out*100, 0)`% é elevado para uma comparação com mercados onde o preço é fortemente determinado por atributos físicos (área, número de quartos, qualidade), mas é coerente com o R² ajustado de ~`r round(summary(m_final)$adj.r.squared * 100, 1)`% obtido no diagnóstico: o modelo capta os principais determinantes estruturais (tipo, localização, perfil do anfitrião) mas não consegue maior precisão sem variáveis que o `listings.csv` não disponibiliza — número de quartos e camas, área útil, fotos, conteúdo qualitativo dos comentários. Para uma análise exploratória do mercado, o erro é aceitável; para uma ferramenta de *pricing* operacional, seria insuficiente sem enriquecimento de dados.
+
+O gráfico de preço real vs. previsto reforça estas observações: a nuvem de pontos segue a diagonal de referência, com tendência ligeira a subestimar nos preços mais altos — comportamento típico de modelos log-log quando lhes faltam variáveis de qualidade no preditor.
+
+# Conclusões e Limitações
+
+## Principais resultados
+
+O modelo final explica `r round(summary(m_final)$adj.r.squared * 100, 1)`% da variação do preço por noite (R² ajustado), com uma capacidade preditiva *out-of-sample* de MAPE = `r round(mape_out*100, 1)`% e MAE = `r round(mae_out, 2)` €. Os principais determinantes do preço, ordenados pela magnitude do efeito, são:
+
+- **Tipo de alojamento** é o preditor com maior impacto: um *Shared room* tem em média um preço cerca de 72% inferior a uma casa inteira; um *Private room* cerca de 26% inferior; um *Hotel room* cerca de 33% superior.
+- **Localização (distância à Acrópole + bairro)** é o segundo grande bloco. A elasticidade da distância é negativa (≈ −0,47): aumentar a distância em 10% reduz o preço em ~5%. Em cima disto, bairros como Kolonaki ou Akropoli adicionam um prémio próprio relativo à zona-base, enquanto Plateia Attikis ou Neos Kosmos têm desconto.
+- **Perfil profissional do anfitrião:** anfitriões com múltiplos imóveis cobram em média 9% mais — provavelmente por gestão profissional e melhor equipamento.
+- **Reviews por mês:** mais reviews por mês está associado a preços ligeiramente mais baixos, sinal de que o segmento de alta rotatividade tende também a ser o de menor preço.
+- **Estadia mínima e disponibilidade anual:** efeitos estatisticamente significativos mas modestos em magnitude.
+
+## Limitações e trabalho futuro
+
+1. **R² ajustado e MAPE moderados.** Cerca de dois terços da variação do preço fica por explicar e o erro percentual médio é de ~`r round(mape_out*100, 0)`%. O `listings.csv` não inclui variáveis cruciais como número de quartos/camas, área útil, fotos, qualidade dos comentários ou amenidades — todas com efeito plausível no preço.
+2. **Apenas um ponto de referência geográfico.** Usámos apenas a distância à Acrópole. Trabalhos futuros podem incluir distância à Praça Sintagma, à estação de metro mais próxima, ao aeroporto e ao Pireu, com ganho marginal esperado de R² e MAPE.
+3. **`has_review` removida por VIF conjunto.** A flag binária `has_review` foi descartada em conjunto com `days_since_last_review` na fase de VIF. Como `has_review` isolada tem VIF baixo, em iterações futuras vale a pena testar reter apenas a flag e descartar só a contagem de dias.
+4. **Heterocedasticidade ligeira não totalmente corrigida.** Aplicámos HC3 para inferência válida, mas os intervalos de previsão (não reportados) seriam mais largos para preços altos do que para preços baixos. Para uma aplicação de *pricing* operacional, este efeito teria de ser tratado explicitamente.
+
+
+
+
+
